@@ -1,7 +1,6 @@
-from sqlalchemy.ext.declarative import declarative_base
+# Placeholder models
+# TODO: Implement SQLAlchemy models
 
-Base = declarative_base()
-
-from .document import Document
-from .collection import Collection
-from .conversation import Conversation
+class Base:
+    """Base model class - placeholder"""
+    pass
