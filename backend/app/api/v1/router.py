@@ -1,14 +1,30 @@
 from fastapi import APIRouter
 
-from .endpoints import documents, search, health
+from .endpoints import health, documents, search, collections
 
 api_router = APIRouter()
 
-# Health check
-api_router.include_router(health.router, prefix="/health", tags=["health"])
+# Include all endpoint routers
+api_router.include_router(
+    health.router,
+    prefix="/health",
+    tags=["Health"]
+)
 
-# Document management
-api_router.include_router(documents.router, prefix="/documents", tags=["documents"])
+api_router.include_router(
+    documents.router,
+    prefix="/documents",
+    tags=["Documents"]
+)
 
-# Search functionality
-api_router.include_router(search.router, prefix="/search", tags=["search"])
+api_router.include_router(
+    search.router,
+    prefix="/search",
+    tags=["Search"]
+)
+
+api_router.include_router(
+    collections.router,
+    prefix="/collections",
+    tags=["Collections"]
+)

@@ -174,3 +174,75 @@ services:
       retries: 3
       start_period: 60s
     restart: unless-stopped
+
+# ===== OPTIMIZED BACKEND DOCKERFILE =====
+# backend/Dockerfile.optimized
+
+FROM python:3.11-slim as base
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=0
+
+# Install system dependencies (cached layer)
+RUN apt-get update && apt-get install -y \
+    curl \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# ===== DEPENDENCY STAGE =====
+FROM base as dependencies
+
+# Copy only requirements first (for better caching)
+COPY requirements.txt .
+
+# Create pip cache directory
+RUN mkdir -p /root/.cache/pip
+
+# Install dependencies with caching
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade pip && \
+    pip install -r requirements.txt
+
+# ===== DEVELOPMENT STAGE =====
+FROM dependencies as development
+
+# Create necessary directories
+RUN mkdir -p /app/app /app/uploads
+
+# Copy application code (this layer changes most often)
+COPY app/ ./app/
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8000/ping || exit 1
+
+# Expose port
+EXPOSE 8000
+
+# Run the application
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+# ===== PRODUCTION STAGE (for later) =====
+FROM dependencies as production
+
+# Copy application code
+COPY app/ ./app/
+
+# Create non-root user for security
+RUN groupadd -r ragflow && useradd -r -g ragflow ragflow
+RUN chown -R ragflow:ragflow /app
+USER ragflow
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8000/ping || exit 1
+
+EXPOSE 8000
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
