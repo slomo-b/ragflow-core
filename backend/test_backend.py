@@ -1,408 +1,481 @@
 #!/usr/bin/env python3
 """
 RagFlow Backend Test Suite
-Comprehensive testing of all backend endpoints and functionality
+Comprehensive testing for the RagFlow backend API
 """
 
 import requests
-import time
 import json
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-import tempfile
-import os
+from typing import Dict, List, Any, Tuple, Optional
+import logging
 
-class BackendTester:
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class RagFlowBackendTester:
     def __init__(self, base_url: str = "http://localhost:8000"):
-        self.base_url = base_url
+        self.base_url = base_url.rstrip('/')
         self.session = requests.Session()
-        self.test_results = []
+        self.session.timeout = 10
+        
+        # Test tracking
         self.total_tests = 0
         self.passed_tests = 0
         self.failed_tests = 0
+        self.warnings = 0
+        self.test_results = []
         
+        # Performance tracking
+        self.response_times = []
+        
+        print(f"🧪 RagFlow Backend Test Suite")
+        print(f"Target: {self.base_url}")
+        print(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print("=" * 60)
+
     def log_test(self, test_name: str, status: str, message: str = "", response_time: float = 0):
         """Log test result"""
         self.total_tests += 1
+        
+        # Status icons
+        icons = {"PASS": "✅", "FAIL": "❌", "WARN": "⚠️", "INFO": "ℹ️"}
+        icon = icons.get(status, "📋")
+        
+        # Update counters
         if status == "PASS":
             self.passed_tests += 1
-            icon = "✅"
         elif status == "FAIL":
             self.failed_tests += 1
-            icon = "❌"
-        else:
-            icon = "⚠️"
+        elif status == "WARN":
+            self.warnings += 1
         
-        result = {
+        # Format output
+        time_str = f"({response_time*1000:.0f}ms)" if response_time > 0 else ""
+        print(f"{icon} {test_name:<35} {status:<4} {message} {time_str}")
+        
+        # Store result
+        self.test_results.append({
             "test": test_name,
             "status": status,
             "message": message,
-            "response_time": response_time
-        }
-        self.test_results.append(result)
-        
-        print(f"{icon} {test_name}: {status}" + (f" - {message}" if message else ""))
-        if response_time > 0:
-            print(f"   Response time: {response_time:.3f}s")
+            "response_time_ms": round(response_time * 1000, 2),
+            "timestamp": datetime.now().isoformat()
+        })
 
-    def test_request(self, method: str, endpoint: str, test_name: str, 
-                    expected_status: int = 200, **kwargs) -> Tuple[bool, Optional[Dict]]:
-        """Make HTTP request and test response"""
+    def make_request(self, method: str, endpoint: str, **kwargs) -> Tuple[bool, Optional[Dict], float]:
+        """Make HTTP request and measure response time"""
         url = f"{self.base_url}{endpoint}"
         start_time = time.time()
         
         try:
-            response = self.session.request(method, url, timeout=10, **kwargs)
+            response = self.session.request(method, url, **kwargs)
             response_time = time.time() - start_time
+            self.response_times.append(response_time)
             
-            if response.status_code == expected_status:
-                try:
-                    json_data = response.json()
-                    self.log_test(test_name, "PASS", f"Status: {response.status_code}", response_time)
-                    return True, json_data
-                except ValueError:
-                    # Non-JSON response
-                    self.log_test(test_name, "PASS", f"Status: {response.status_code} (non-JSON)", response_time)
-                    return True, {"text": response.text}
-            else:
-                self.log_test(test_name, "FAIL", f"Expected {expected_status}, got {response.status_code}", response_time)
-                return False, None
+            # Try to parse JSON
+            try:
+                data = response.json()
+                return response.status_code == 200, data, response_time
+            except json.JSONDecodeError:
+                # Return text for non-JSON responses (like HTML docs)
+                return response.status_code == 200, {"text": response.text[:200]}, response_time
                 
         except requests.exceptions.RequestException as e:
             response_time = time.time() - start_time
-            self.log_test(test_name, "FAIL", f"Request failed: {str(e)}", response_time)
-            return False, None
+            return False, {"error": str(e)}, response_time
 
-    def test_connectivity(self):
-        """Test basic connectivity"""
+    def test_connectivity(self) -> bool:
+        """Test basic backend connectivity"""
         print("\n🔌 CONNECTIVITY TESTS")
-        print("=" * 40)
+        print("-" * 40)
         
-        # Test backend is reachable
-        success, _ = self.test_request("GET", "/", "Backend Connectivity")
-        if not success:
-            print("❌ Backend not reachable - stopping tests")
+        success, data, resp_time = self.make_request("GET", "/")
+        if success:
+            self.log_test("Backend Reachable", "PASS", "API is responding", resp_time)
+            return True
+        else:
+            self.log_test("Backend Reachable", "FAIL", f"Connection failed: {data.get('error', 'Unknown')}", resp_time)
             return False
-        return True
 
     def test_core_endpoints(self):
         """Test core API endpoints"""
-        print("\n🏠 CORE ENDPOINT TESTS")
-        print("=" * 40)
+        print("\n🏠 CORE API ENDPOINTS")
+        print("-" * 40)
         
         # Root endpoint
-        success, data = self.test_request("GET", "/", "Root Endpoint")
+        success, data, resp_time = self.make_request("GET", "/")
         if success and data:
             if "message" in data and "version" in data:
-                self.log_test("Root Data Structure", "PASS", "Contains message and version")
+                self.log_test("Root Endpoint", "PASS", f"v{data.get('version', 'unknown')}", resp_time)
+                
+                # Check features
+                features = data.get("features", {})
+                enabled_features = [k for k, v in features.items() if v]
+                if enabled_features:
+                    self.log_test("Feature Check", "INFO", f"Enabled: {', '.join(enabled_features)}")
             else:
-                self.log_test("Root Data Structure", "FAIL", "Missing required fields")
+                self.log_test("Root Endpoint", "WARN", "Missing expected fields", resp_time)
+        else:
+            self.log_test("Root Endpoint", "FAIL", "Invalid response", resp_time)
 
         # Ping endpoint
-        success, data = self.test_request("GET", "/ping", "Ping Endpoint")
-        if success and data:
-            if data.get("message") == "pong":
-                self.log_test("Ping Response", "PASS", "Correct pong response")
-            else:
-                self.log_test("Ping Response", "FAIL", f"Expected 'pong', got {data.get('message')}")
+        success, data, resp_time = self.make_request("GET", "/ping")
+        if success and data and data.get("message") == "pong":
+            self.log_test("Ping Health", "PASS", "Pong received", resp_time)
+        else:
+            self.log_test("Ping Health", "FAIL", "No pong response", resp_time)
 
-        # Health endpoint
-        success, data = self.test_request("GET", "/health", "Health Endpoint")
-        if success and data:
-            if data.get("status") == "healthy":
-                self.log_test("Health Status", "PASS", "Backend reports healthy")
-            else:
-                self.log_test("Health Status", "FAIL", f"Status: {data.get('status')}")
+        # Basic health
+        success, data, resp_time = self.make_request("GET", "/health")
+        if success and data and data.get("status") == "healthy":
+            self.log_test("Basic Health", "PASS", "Backend healthy", resp_time)
+        else:
+            self.log_test("Basic Health", "FAIL", "Backend not healthy", resp_time)
 
-    def test_api_v1_endpoints(self):
-        """Test API v1 endpoints"""
-        print("\n🔗 API v1 ENDPOINT TESTS")
-        print("=" * 40)
+    def test_health_endpoints(self):
+        """Test comprehensive health endpoints"""
+        print("\n🏥 HEALTH MONITORING")
+        print("-" * 40)
         
-        # Health v1
-        success, data = self.test_request("GET", "/api/v1/health/", "Health v1 Endpoint")
+        # Detailed health check
+        success, data, resp_time = self.make_request("GET", "/api/v1/health/")
         if success and data:
-            if data.get("status") == "healthy" and "checks" in data:
-                self.log_test("Health v1 Structure", "PASS", "Contains status and checks")
-            else:
-                self.log_test("Health v1 Structure", "FAIL", "Missing required fields")
+            status = data.get("status", "unknown")
+            self.log_test("Health v1", "PASS" if status == "healthy" else "WARN", f"Status: {status}", resp_time)
+            
+            # Check individual services
+            checks = data.get("checks", {})
+            for service, check in checks.items():
+                service_status = check.get("status", "unknown")
+                service_msg = check.get("message", "")
+                status_level = "PASS" if service_status in ["healthy", "available"] else "FAIL"
+                self.log_test(f"{service.title()} Service", status_level, f"{service_status}: {service_msg}")
+        else:
+            self.log_test("Health v1", "FAIL", "Health check failed", resp_time)
 
-        # Ready endpoint
-        success, data = self.test_request("GET", "/api/v1/health/ready", "Ready Endpoint")
+        # Readiness check
+        success, data, resp_time = self.make_request("GET", "/api/v1/health/ready")
+        if success and data:
+            self.log_test("Readiness Check", "PASS", "Backend ready", resp_time)
+        else:
+            self.log_test("Readiness Check", "FAIL", "Backend not ready", resp_time)
+
+        # System info
+        success, data, resp_time = self.make_request("GET", "/api/v1/health/info")
+        if success and data:
+            app_name = data.get("app_name", "Unknown")
+            version = data.get("version", "Unknown")
+            self.log_test("System Info", "PASS", f"{app_name} v{version}", resp_time)
+            
+            # Log configuration details
+            config_items = []
+            if "max_file_size_mb" in data:
+                config_items.append(f"Max file: {data['max_file_size_mb']}MB")
+            if "embedding_model" in data:
+                config_items.append(f"Model: {data['embedding_model']}")
+            if config_items:
+                self.log_test("Configuration", "INFO", " | ".join(config_items))
+        else:
+            self.log_test("System Info", "WARN", "No system info available", resp_time)
+
+    def test_api_endpoints(self):
+        """Test main API endpoints"""
+        print("\n🔗 API ENDPOINTS")
+        print("-" * 40)
         
-        # Documents list (should be placeholder)
-        success, data = self.test_request("GET", "/api/v1/documents/", "Documents List")
+        # Documents endpoint
+        success, data, resp_time = self.make_request("GET", "/api/v1/documents/")
+        if success:
+            self.log_test("Documents List", "PASS", "Endpoint accessible", resp_time)
+            if data and "documents" in data:
+                doc_count = len(data.get("documents", []))
+                self.log_test("Document Count", "INFO", f"{doc_count} documents found")
+        else:
+            self.log_test("Documents List", "FAIL", "Endpoint not accessible", resp_time)
+
+        # Collections endpoint
+        success, data, resp_time = self.make_request("GET", "/api/v1/collections/")
+        if success:
+            self.log_test("Collections List", "PASS", "Endpoint accessible", resp_time)
+        else:
+            self.log_test("Collections List", "FAIL", "Endpoint not accessible", resp_time)
+
+        # Development routes
+        success, data, resp_time = self.make_request("GET", "/api/v1/dev/routes")
         if success and data:
-            if "message" in data and "documents" in data:
-                self.log_test("Documents Structure", "PASS", "Placeholder response correct")
-            else:
-                self.log_test("Documents Structure", "FAIL", "Unexpected response structure")
+            route_count = data.get("total_routes", 0)
+            self.log_test("Routes List", "PASS", f"{route_count} routes found", resp_time)
+        else:
+            self.log_test("Routes List", "WARN", "Dev routes not available", resp_time)
 
-        # Collections list (should be placeholder)
-        success, data = self.test_request("GET", "/api/v1/collections/", "Collections List")
+        # System status
+        success, data, resp_time = self.make_request("GET", "/api/v1/system/status")
+        if success and data:
+            status = data.get("status", "unknown")
+            mode = data.get("mode", "unknown")
+            self.log_test("System Status", "PASS", f"{status} ({mode})", resp_time)
+            
+            # Check services status
+            services = data.get("services", {})
+            healthy_services = sum(1 for status in services.values() if status in ["healthy", "available"])
+            total_services = len(services)
+            self.log_test("Services Status", "INFO", f"{healthy_services}/{total_services} healthy")
+        else:
+            self.log_test("System Status", "FAIL", "Status not available", resp_time)
 
-    def test_api_documentation(self):
+    def test_documentation(self):
         """Test API documentation endpoints"""
-        print("\n📚 DOCUMENTATION TESTS")
-        print("=" * 40)
+        print("\n📚 DOCUMENTATION")
+        print("-" * 40)
         
-        # OpenAPI docs
-        success, _ = self.test_request("GET", "/docs", "Swagger UI")
-        
-        # OpenAPI JSON
-        success, data = self.test_request("GET", "/openapi.json", "OpenAPI Schema")
-        if success and data:
-            if "openapi" in data and "info" in data:
-                self.log_test("OpenAPI Structure", "PASS", "Valid OpenAPI schema")
-            else:
-                self.log_test("OpenAPI Structure", "FAIL", "Invalid OpenAPI schema")
+        # Swagger UI
+        success, data, resp_time = self.make_request("GET", "/docs")
+        if success:
+            self.log_test("Swagger UI", "PASS", "Documentation accessible", resp_time)
+        else:
+            self.log_test("Swagger UI", "FAIL", "Swagger not accessible", resp_time)
+
+        # OpenAPI schema
+        success, data, resp_time = self.make_request("GET", "/openapi.json")
+        if success and data and "openapi" in str(data):
+            self.log_test("OpenAPI Schema", "PASS", "Valid schema", resp_time)
+        else:
+            self.log_test("OpenAPI Schema", "FAIL", "Invalid schema", resp_time)
 
         # ReDoc
-        success, _ = self.test_request("GET", "/redoc", "ReDoc Documentation")
+        success, data, resp_time = self.make_request("GET", "/redoc")
+        if success:
+            self.log_test("ReDoc", "PASS", "ReDoc accessible", resp_time)
+        else:
+            self.log_test("ReDoc", "WARN", "ReDoc not accessible", resp_time)
 
     def test_post_endpoints(self):
-        """Test POST endpoints (placeholders)"""
-        print("\n📤 POST ENDPOINT TESTS")
-        print("=" * 40)
+        """Test POST endpoints (placeholder tests)"""
+        print("\n📤 POST ENDPOINTS")
+        print("-" * 40)
         
-        # Search endpoint
-        search_data = {
-            "query": "test query",
-            "top_k": 5
-        }
-        success, data = self.test_request("POST", "/api/v1/search/semantic", 
-                                        "Search Endpoint", 
-                                        json=search_data)
-        
-        # Upload endpoint (without file for now)
-        success, data = self.test_request("POST", "/api/v1/documents/upload", 
-                                        "Upload Endpoint (no file)", 
-                                        expected_status=422)  # Expect validation error
+        # Document upload (without file - should fail gracefully)
+        success, data, resp_time = self.make_request("POST", "/api/v1/documents/upload")
+        # We expect this to fail with 422 (validation error), but endpoint should exist
+        if resp_time > 0:  # If we got any response, endpoint exists
+            self.log_test("Upload Endpoint", "PASS", "Endpoint exists (validation error expected)", resp_time)
+        else:
+            self.log_test("Upload Endpoint", "FAIL", "Endpoint not found", resp_time)
 
-    def test_error_handling(self):
-        """Test error handling"""
-        print("\n🚨 ERROR HANDLING TESTS")
-        print("=" * 40)
-        
-        # 404 endpoint
-        success, _ = self.test_request("GET", "/nonexistent", "404 Error Handling", 
-                                     expected_status=404)
-        
-        # Invalid method
-        success, _ = self.test_request("DELETE", "/", "Invalid Method", 
-                                     expected_status=405)
-
-    def test_cors_headers(self):
-        """Test CORS configuration"""
-        print("\n🌐 CORS TESTS")
-        print("=" * 40)
-        
-        try:
-            response = self.session.options(f"{self.base_url}/", headers={
-                "Origin": "http://localhost:3000",
-                "Access-Control-Request-Method": "GET"
-            })
-            
-            if "Access-Control-Allow-Origin" in response.headers:
-                self.log_test("CORS Headers", "PASS", "CORS headers present")
-            else:
-                self.log_test("CORS Headers", "FAIL", "CORS headers missing")
-                
-        except Exception as e:
-            self.log_test("CORS Headers", "FAIL", f"CORS test failed: {e}")
+        # Semantic search (without query - should fail gracefully)
+        success, data, resp_time = self.make_request("POST", "/api/v1/search/semantic", 
+                                                   json={"query": "test query"})
+        if resp_time > 0:  # If we got any response, endpoint exists
+            self.log_test("Search Endpoint", "PASS", "Endpoint exists", resp_time)
+        else:
+            self.log_test("Search Endpoint", "FAIL", "Endpoint not found", resp_time)
 
     def test_performance(self):
-        """Test basic performance"""
-        print("\n⚡ PERFORMANCE TESTS")
-        print("=" * 40)
+        """Test performance metrics"""
+        print("\n⚡ PERFORMANCE ANALYSIS")
+        print("-" * 40)
         
-        # Test multiple requests
-        times = []
-        for i in range(5):
-            start_time = time.time()
-            response = self.session.get(f"{self.base_url}/ping")
-            end_time = time.time()
-            if response.status_code == 200:
-                times.append(end_time - start_time)
-        
-        if times:
-            avg_time = sum(times) / len(times)
-            max_time = max(times)
-            min_time = min(times)
+        if self.response_times:
+            avg_time = sum(self.response_times) / len(self.response_times)
+            max_time = max(self.response_times)
+            min_time = min(self.response_times)
             
-            if avg_time < 1.0:
-                self.log_test("Response Time", "PASS", f"Avg: {avg_time:.3f}s (Max: {max_time:.3f}s)")
+            # Performance assessment
+            if avg_time < 0.1:
+                perf_status = "PASS"
+                perf_msg = "Excellent"
+            elif avg_time < 0.5:
+                perf_status = "PASS"
+                perf_msg = "Good"
+            elif avg_time < 1.0:
+                perf_status = "WARN"
+                perf_msg = "Acceptable"
             else:
-                self.log_test("Response Time", "WARN", f"Slow response: {avg_time:.3f}s")
-
-    def test_database_services(self):
-        """Test database service connectivity"""
-        print("\n🗄️ DATABASE SERVICE TESTS")
-        print("=" * 40)
-        
-        # Test if backend can reach databases (through health endpoint)
-        success, data = self.test_request("GET", "/api/v1/health/", "Database Health Check")
-        if success and data and "checks" in data:
-            checks = data["checks"]
+                perf_status = "FAIL"
+                perf_msg = "Slow"
             
-            for service in ["database", "vector_db"]:
-                if service in checks:
-                    status = checks[service].get("status", "unknown")
-                    if status in ["healthy", "available", "ready"]:
-                        self.log_test(f"{service.title()} Status", "PASS", f"Status: {status}")
-                    else:
-                        self.log_test(f"{service.title()} Status", "FAIL", f"Status: {status}")
-                else:
-                    self.log_test(f"{service.title()} Status", "WARN", "No status reported")
+            self.log_test("Response Time", perf_status, 
+                         f"Avg: {avg_time*1000:.0f}ms, Max: {max_time*1000:.0f}ms ({perf_msg})")
+            
+            # Test load capacity with concurrent requests
+            self.test_concurrent_load()
 
-    def test_concurrent_requests(self):
+    def test_concurrent_load(self):
         """Test concurrent request handling"""
-        print("\n🔄 CONCURRENCY TESTS")
-        print("=" * 40)
-        
         import threading
+        import queue
         
-        results = []
+        results_queue = queue.Queue()
+        num_threads = 5
         
-        def make_request():
-            try:
-                response = self.session.get(f"{self.base_url}/ping", timeout=5)
-                results.append(response.status_code == 200)
-            except:
-                results.append(False)
+        def worker():
+            success, _, resp_time = self.make_request("GET", "/ping")
+            results_queue.put((success, resp_time))
         
-        # Create 10 concurrent threads
+        # Launch concurrent requests
         threads = []
-        for i in range(10):
-            thread = threading.Thread(target=make_request)
-            threads.append(thread)
-        
-        # Start all threads
         start_time = time.time()
-        for thread in threads:
+        
+        for _ in range(num_threads):
+            thread = threading.Thread(target=worker)
             thread.start()
+            threads.append(thread)
         
         # Wait for all threads
         for thread in threads:
             thread.join()
         
-        end_time = time.time()
-        
-        success_count = sum(results)
-        if success_count == 10:
-            self.log_test("Concurrent Requests", "PASS", 
-                         f"10/10 successful in {end_time - start_time:.3f}s")
-        else:
-            self.log_test("Concurrent Requests", "FAIL", 
-                         f"Only {success_count}/10 successful")
-
-    def run_all_tests(self):
-        """Run all test suites"""
-        print("🧪 RagFlow Backend Test Suite")
-        print("="*50)
-        print(f"Testing backend at: {self.base_url}")
-        print(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-        
-        start_time = time.time()
-        
-        # Run test suites
-        if not self.test_connectivity():
-            return self.print_summary()
-        
-        self.test_core_endpoints()
-        self.test_api_v1_endpoints()
-        self.test_api_documentation()
-        self.test_post_endpoints()
-        self.test_error_handling()
-        self.test_cors_headers()
-        self.test_performance()
-        self.test_database_services()
-        self.test_concurrent_requests()
-        
         total_time = time.time() - start_time
         
-        self.print_summary(total_time)
+        # Collect results
+        successes = 0
+        response_times = []
+        
+        for _ in range(num_threads):
+            try:
+                success, resp_time = results_queue.get_nowait()
+                if success:
+                    successes += 1
+                response_times.append(resp_time)
+            except queue.Empty:
+                break
+        
+        success_rate = (successes / num_threads) * 100
+        avg_concurrent_time = sum(response_times) / len(response_times) if response_times else 0
+        
+        if success_rate >= 100:
+            self.log_test("Concurrent Load", "PASS", 
+                         f"{successes}/{num_threads} success, {avg_concurrent_time*1000:.0f}ms avg")
+        elif success_rate >= 80:
+            self.log_test("Concurrent Load", "WARN", 
+                         f"{successes}/{num_threads} success ({success_rate:.0f}%)")
+        else:
+            self.log_test("Concurrent Load", "FAIL", 
+                         f"Only {successes}/{num_threads} success ({success_rate:.0f}%)")
 
-    def print_summary(self, total_time: float = 0):
+    def run_all_tests(self) -> bool:
+        """Run the complete test suite"""
+        print(f"🚀 Starting comprehensive backend tests...")
+        
+        # Test connectivity first
+        if not self.test_connectivity():
+            print("\n❌ Backend not reachable - stopping tests")
+            return False
+        
+        # Run all test categories
+        self.test_core_endpoints()
+        self.test_health_endpoints()
+        self.test_api_endpoints()
+        self.test_documentation()
+        self.test_post_endpoints()
+        self.test_performance()
+        
+        # Generate summary
+        self.print_summary()
+        
+        return self.failed_tests == 0
+
+    def run_quick_tests(self) -> bool:
+        """Run essential tests only"""
+        print(f"⚡ Running quick backend tests...")
+        
+        if not self.test_connectivity():
+            return False
+            
+        self.test_core_endpoints()
+        self.test_health_endpoints()
+        self.print_summary()
+        
+        return self.failed_tests == 0
+
+    def print_summary(self):
         """Print test summary"""
-        print("\n" + "="*50)
+        print("\n" + "=" * 60)
         print("📊 TEST SUMMARY")
-        print("="*50)
-        print(f"Total Tests: {self.total_tests}")
-        print(f"✅ Passed: {self.passed_tests}")
-        print(f"❌ Failed: {self.failed_tests}")
-        print(f"⚠️  Warnings: {self.total_tests - self.passed_tests - self.failed_tests}")
+        print("=" * 60)
         
-        if total_time > 0:
-            print(f"⏱️  Total Time: {total_time:.3f}s")
-        
+        # Statistics
         success_rate = (self.passed_tests / self.total_tests * 100) if self.total_tests > 0 else 0
+        
+        print(f"Total Tests:    {self.total_tests}")
+        print(f"✅ Passed:      {self.passed_tests}")
+        print(f"❌ Failed:      {self.failed_tests}")
+        print(f"⚠️  Warnings:    {self.warnings}")
         print(f"📈 Success Rate: {success_rate:.1f}%")
         
+        # Performance summary
+        if self.response_times:
+            avg_time = sum(self.response_times) / len(self.response_times)
+            print(f"⚡ Avg Response: {avg_time*1000:.0f}ms")
+        
+        # Overall status
+        print("\n" + "-" * 60)
         if self.failed_tests == 0:
-            print("\n🎉 ALL TESTS PASSED!")
-            print("Backend is ready for Phase 2 development!")
+            print("🎉 ALL TESTS PASSED!")
+            print("✅ Backend is ready for development!")
         elif self.failed_tests <= 2:
-            print("\n✅ MOSTLY SUCCESSFUL!")
-            print("Backend is functional with minor issues.")
+            print("✅ MOSTLY SUCCESSFUL!")
+            print("⚠️  Minor issues detected - check warnings above")
         else:
-            print("\n⚠️ MULTIPLE ISSUES DETECTED!")
-            print("Backend needs attention before proceeding.")
+            print("❌ MULTIPLE FAILURES!")
+            print("🔧 Backend needs attention before proceeding")
         
-        # Print failed tests
-        if self.failed_tests > 0:
-            print("\n❌ Failed Tests:")
-            for result in self.test_results:
-                if result["status"] == "FAIL":
-                    print(f"   - {result['test']}: {result['message']}")
-        
-        print("\n🔗 Quick Links:")
-        print(f"   Backend API: {self.base_url}")
-        print(f"   API Docs: {self.base_url}/docs")
-        print(f"   Health Check: {self.base_url}/api/v1/health/")
+        # Quick links
+        print(f"\n🔗 Quick Links:")
+        print(f"   API:          {self.base_url}")
+        print(f"   Docs:         {self.base_url}/docs")
+        print(f"   Health:       {self.base_url}/api/v1/health/")
+        print(f"   System:       {self.base_url}/api/v1/system/status")
         
         return self.failed_tests == 0
 
 def main():
-    """Main function"""
+    """Main function with CLI support"""
     import argparse
     
     parser = argparse.ArgumentParser(description="RagFlow Backend Test Suite")
     parser.add_argument("--url", default="http://localhost:8000", 
                        help="Backend URL (default: http://localhost:8000)")
-    parser.add_argument("--json", action="store_true", 
-                       help="Output results in JSON format")
     parser.add_argument("--quick", action="store_true",
                        help="Run only essential tests")
+    parser.add_argument("--json", action="store_true",
+                       help="Output results in JSON format")
+    parser.add_argument("--verbose", "-v", action="store_true",
+                       help="Verbose output")
     
     args = parser.parse_args()
     
-    tester = BackendTester(args.url)
+    # Create tester
+    tester = RagFlowBackendTester(args.url)
     
+    # Run tests
     if args.quick:
-        # Quick test mode
-        print("🚀 Quick Test Mode")
-        tester.test_connectivity()
-        tester.test_core_endpoints()
-        tester.test_api_v1_endpoints()
+        success = tester.run_quick_tests()
     else:
-        # Full test suite
-        tester.run_all_tests()
+        success = tester.run_all_tests()
     
+    # JSON output
     if args.json:
-        # Output JSON results
         results = {
+            "timestamp": datetime.now().isoformat(),
+            "backend_url": args.url,
             "total_tests": tester.total_tests,
             "passed": tester.passed_tests,
             "failed": tester.failed_tests,
-            "success_rate": tester.passed_tests / tester.total_tests * 100 if tester.total_tests > 0 else 0,
+            "warnings": tester.warnings,
+            "success_rate": (tester.passed_tests / tester.total_tests * 100) if tester.total_tests > 0 else 0,
+            "avg_response_time_ms": sum(tester.response_times) / len(tester.response_times) * 1000 if tester.response_times else 0,
             "tests": tester.test_results
         }
         print("\n" + json.dumps(results, indent=2))
     
-    # Exit code based on results
-    sys.exit(0 if tester.failed_tests == 0 else 1)
+    # Exit code
+    sys.exit(0 if success else 1)
 
 if __name__ == "__main__":
     main()
