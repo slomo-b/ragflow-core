@@ -1,328 +1,360 @@
-#!/usr/bin/env python3
-"""
-Fixed Smart Development Environment Script
-- Corrected container detection logic
-- Better parsing of docker ps output
-- Improved debugging
-"""
-
 import subprocess
 import sys
+import os
 import time
-import requests
 import json
-import hashlib
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+import shutil
+import logging
+from datetime import datetime
 
-class RagFlowDev:
+# Configure logging with UTF-8 encoding
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
+
+class RagFlowDevEnvironment:
     def __init__(self):
-        self.base_path = Path.cwd()
-        self.docker_compose_file = "docker/docker-compose.dev.yml"
-        self.backend_path = self.base_path / "backend"
-        self.requirements_file = self.backend_path / "requirements.txt"
+        self.project_root = Path.cwd()
+        self.compose_file = self.project_root / "docker" / "docker-compose.dev.yml"
+        self.backup_dir = self.project_root / ".ragflow_backups"
         
-    def run_command(self, cmd: List[str], check: bool = True, capture_output: bool = True) -> subprocess.CompletedProcess:
-        """Run command with logging"""
-        print(f"🔧 Running: {' '.join(cmd)}")
+        # Extended timeout for slow builds
+        self.build_timeout = 300  # 5 minutes instead of 60 seconds
+        self.start_timeout = 180  # 3 minutes for startup
+        
+    def run_command(self, cmd, timeout=None, cwd=None, capture_output=True):
+        """Run command with proper encoding handling for Windows"""
         try:
-            result = subprocess.run(cmd, check=check, capture_output=capture_output, text=True)
-            if result.stdout and capture_output:
-                # Only show first few lines to avoid spam
-                output_lines = result.stdout.strip().split('\n')
-                if len(output_lines) <= 3:
-                    print(f"📤 Output: {result.stdout.strip()}")
-                else:
-                    print(f"📤 Output: {output_lines[0]}... ({len(output_lines)} lines)")
-            return result
-        except subprocess.CalledProcessError as e:
-            print(f"❌ Command failed: {e}")
-            if e.stderr and capture_output:
-                print(f"📥 Error: {e.stderr.strip()}")
-            if check:
-                raise
-            return e
-
-    def check_docker(self) -> bool:
-        """Check if Docker is available"""
-        try:
-            result = self.run_command(["docker", "--version"])
-            print("✅ Docker is available")
-            return True
-        except subprocess.CalledProcessError:
-            print("❌ Docker is not running or not installed")
-            return False
-
-    def get_container_status(self) -> Dict[str, str]:
-        """Get status of all RagFlow containers - FIXED VERSION"""
-        try:
-            result = self.run_command([
-                "docker", "ps", "-a", 
-                "--filter", "name=ragflow",
-                "--format", "{{.Names}}\t{{.Status}}"
-            ], check=False)
-            
-            containers = {}
-            if result.returncode == 0 and result.stdout.strip():
-                lines = result.stdout.strip().split('\n')
-                for line in lines:
-                    if line.strip() and '\t' in line:
-                        parts = line.split('\t', 1)
-                        if len(parts) == 2:
-                            name = parts[0].strip()
-                            status = parts[1].strip()
-                            containers[name] = status
-                            print(f"   Found: {name} → {status}")
-            
-            return containers
+            # Use UTF-8 encoding and handle Windows cmd issues
+            process = subprocess.run(
+                cmd,
+                cwd=cwd or self.project_root,
+                capture_output=capture_output,
+                text=True,
+                timeout=timeout,
+                encoding='utf-8',
+                errors='replace',  # Replace problematic characters instead of failing
+                shell=True if sys.platform == "win32" else False
+            )
+            return process
+        except subprocess.TimeoutExpired:
+            logger.error(f"❌ Command timed out after {timeout}s: {' '.join(cmd)}")
+            raise
+        except UnicodeDecodeError as e:
+            logger.error(f"❌ Unicode decode error: {e}")
+            raise
         except Exception as e:
-            print(f"❌ Error getting container status: {e}")
-            return {}
+            logger.error(f"❌ Unexpected error: {e}")
+            raise
 
-    def check_backend_health(self, timeout: int = 30) -> bool:
-        """Check if backend is healthy"""
-        print("🔍 Checking backend health...")
+    def check_system_requirements(self):
+        """Check system requirements"""
+        logger.info("🔍 Checking system requirements...")
+        requirements_met = True
         
-        for i in range(timeout):
-            try:
-                response = requests.get("http://localhost:8000/ping", timeout=5)
-                if response.status_code == 200:
-                    print("✅ Backend is healthy!")
-                    return True
-            except requests.exceptions.RequestException:
-                pass
+        # Check Docker
+        try:
+            result = self.run_command(["docker", "--version"], timeout=10)
+            if result.returncode == 0:
+                logger.info(f"✅ Docker: {result.stdout.strip()}")
+            else:
+                logger.error("❌ Docker not found or not running")
+                requirements_met = False
+        except Exception:
+            logger.error("❌ Docker not found or not running")
+            requirements_met = False
             
-            if i % 10 == 0 and i > 0:
-                print(f"⏳ Still waiting for backend... ({i}s)")
-            time.sleep(1)
+        # Check Docker Compose
+        try:
+            result = self.run_command(["docker", "compose", "version"], timeout=10)
+            if result.returncode == 0:
+                logger.info(f"✅ Docker Compose: {result.stdout.strip()}")
+            else:
+                logger.error("❌ Docker Compose not found")
+                requirements_met = False
+        except Exception:
+            logger.error("❌ Docker Compose not found")
+            requirements_met = False
+            
+        # Check available disk space
+        try:
+            if sys.platform == "win32":
+                import shutil
+                free_space = shutil.disk_usage('.').free / (1024**3)  # GB
+            else:
+                statvfs = os.statvfs('.')
+                free_space = statvfs.f_frsize * statvfs.f_bavail / (1024**3)  # GB
+                
+            if free_space < 10:
+                logger.warning(f"⚠️  Disk Space: {free_space:.1f}GB free (10GB+ recommended)")
+                requirements_met = False
+            else:
+                logger.info(f"✅ Disk Space: {free_space:.1f}GB free")
+        except Exception:
+            logger.warning("⚠️  Could not check disk space")
+            
+        # Check CPU cores
+        try:
+            import multiprocessing
+            cpu_count = multiprocessing.cpu_count()
+            if cpu_count >= 2:
+                logger.info(f"✅ CPU: {cpu_count} cores")
+            else:
+                logger.warning(f"⚠️  CPU: {cpu_count} core (2+ recommended)")
+                requirements_met = False
+        except Exception:
+            logger.warning("⚠️  Could not check CPU count")
+            
+        # Check platform
+        import platform
+        logger.info(f"✅ Platform: {platform.system()} {platform.release()}")
         
-        print("❌ Backend health check failed")
+        # Check Python version
+        python_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+        logger.info(f"✅ Python: {python_version}")
+        
+        if not requirements_met:
+            logger.warning("⚠️ Some system requirements are not met.")
+            logger.warning("The environment may not work optimally.")
+            
+        return requirements_met
+
+    def create_backup(self):
+        """Create backup of critical files"""
+        logger.info("💾 Creating backup of critical files...")
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = self.backup_dir / f"backup_{timestamp}"
+        backup_path.mkdir(parents=True, exist_ok=True)
+        
+        critical_files = [
+            "docker/docker-compose.dev.yml",
+            "backend/requirements.txt",
+            "backend/app/main.py",
+            "frontend/package.json"
+        ]
+        
+        for file_path in critical_files:
+            src = self.project_root / file_path
+            if src.exists():
+                dst = backup_path / file_path
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+                logger.info(f"Backed up: {file_path}")
+        
+        logger.info(f"✅ Backup created: {backup_path}")
+        return backup_path
+
+    def check_compose_file(self):
+        """Check if compose file exists"""
+        if not self.compose_file.exists():
+            logger.error(f"❌ Docker compose file not found: {self.compose_file}")
+            return False
+        
+        logger.info(f"✅ Using Docker Compose file: {self.compose_file}")
+        return True
+
+    def build_services_with_retry(self, service=None, max_retries=2):
+        """Build services with retry logic and extended timeout"""
+        for attempt in range(max_retries + 1):
+            try:
+                if service:
+                    logger.info(f"🔨 Building {service} (attempt {attempt + 1}/{max_retries + 1})...")
+                    cmd = ["docker", "compose", "-f", str(self.compose_file), "build", "--no-cache", service]
+                else:
+                    logger.info(f"🔨 Building all services (attempt {attempt + 1}/{max_retries + 1})...")
+                    cmd = ["docker", "compose", "-f", str(self.compose_file), "build", "--no-cache"]
+                
+                result = self.run_command(cmd, timeout=self.build_timeout, capture_output=False)
+                
+                if result.returncode == 0:
+                    logger.info(f"✅ Build successful!")
+                    return True
+                else:
+                    logger.error(f"❌ Build failed with return code {result.returncode}")
+                    if attempt < max_retries:
+                        logger.info("🔄 Retrying build...")
+                        time.sleep(5)
+                    
+            except subprocess.TimeoutExpired:
+                logger.error(f"❌ Build timed out after {self.build_timeout}s")
+                if attempt < max_retries:
+                    logger.info("🔄 Retrying with longer timeout...")
+                    self.build_timeout += 120  # Add 2 more minutes each retry
+                    time.sleep(10)
+                else:
+                    logger.error("❌ Build failed after all retries")
+                    return False
+            except Exception as e:
+                logger.error(f"❌ Build error: {e}")
+                if attempt < max_retries:
+                    logger.info("🔄 Retrying build...")
+                    time.sleep(5)
+                else:
+                    return False
+        
         return False
 
-    def get_backend_logs(self, lines: int = 30) -> str:
-        """Get recent backend logs"""
+    def start_infrastructure_services(self):
+        """Start infrastructure services first"""
+        logger.info("⏳ Starting infrastructure services...")
+        
+        infrastructure = ["postgres", "qdrant", "redis"]
+        cmd = ["docker", "compose", "-f", str(self.compose_file), "up", "-d"] + infrastructure
+        
         try:
-            result = self.run_command([
-                "docker", "logs", "--tail", str(lines), "ragflow-backend"
-            ], check=False)
+            result = self.run_command(cmd, timeout=60, capture_output=False)
+            if result.returncode != 0:
+                logger.error("❌ Failed to start infrastructure services")
+                return False
+                
+            # Wait for services to be healthy
+            logger.info("⏳ Waiting for infrastructure services to be healthy...")
+            time.sleep(30)  # Give services time to start
             
-            if result.returncode == 0:
-                return result.stdout
-            return f"Failed to get logs: {result.stderr}"
-        except:
-            return "Failed to get logs - container may not exist"
-
-    def diagnose_backend_problem(self) -> str:
-        """Diagnose specific backend problems"""
-        print("🔍 Diagnosing backend problem...")
-        
-        # Check if container exists
-        containers = self.get_container_status()
-        if "ragflow-backend" not in containers:
-            return "container_missing"
-        
-        status = containers["ragflow-backend"]
-        
-        if "healthy" in status.lower():
-            return "healthy"
-        elif "unhealthy" in status.lower():
-            # Get logs to determine why unhealthy
-            logs = self.get_backend_logs(50)
+            # Check if services are running
+            for service in infrastructure:
+                check_cmd = ["docker", "compose", "-f", str(self.compose_file), "ps", service]
+                result = self.run_command(check_cmd, timeout=10)
+                if "Up" not in result.stdout:
+                    logger.warning(f"⚠️  {service} may not be fully ready")
             
-            if "sqlalchemy" in logs.lower() and "table" in logs.lower() and "already defined" in logs.lower():
-                return "sqlalchemy_conflict"
-            elif "modulenotfounderror" in logs.lower():
-                return "missing_dependencies"
-            elif "importerror" in logs.lower():
-                return "import_error"
-            elif "connection" in logs.lower() and ("refused" in logs.lower() or "failed" in logs.lower()):
-                return "connection_error"
-            else:
-                return "unknown_unhealthy"
-        elif "exited" in status.lower():
-            return "container_exited"
-        else:
-            return "unknown_status"
-
-    def fix_sqlalchemy_conflict(self):
-        """Fix the SQLAlchemy table conflict"""
-        print("🔧 Fixing SQLAlchemy table conflict...")
-        
-        collection_file = self.backend_path / "app" / "models" / "collection.py"
-        
-        fixed_content = '''from sqlalchemy import Column, String, Text, DateTime, JSON, Integer
-from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import relationship
-from datetime import datetime
-import uuid
-
-from ..core.database import Base
-
-class Collection(Base):
-    __tablename__ = "collections"
-    
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    name = Column(String(255), nullable=False)
-    description = Column(Text)
-    documents_count = Column(Integer, default=0)
-    total_chunks = Column(Integer, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    meta_data = Column(JSON, default=dict)
-    
-    documents = relationship("Document", back_populates="collection")
-    
-    def __repr__(self):
-        return f"<Collection(id={self.id}, name='{self.name}', documents={self.documents_count})>"
-'''
-        
-        # Backup and fix
-        if collection_file.exists():
-            backup_file = collection_file.with_suffix('.py.backup')
-            backup_file.write_text(collection_file.read_text())
-            print(f"✅ Backed up to {backup_file}")
-        
-        collection_file.write_text(fixed_content)
-        print("✅ Fixed SQLAlchemy model conflict")
-
-    def restart_backend(self):
-        """Restart just the backend container"""
-        print("🔄 Restarting backend container...")
-        self.run_command([
-            "docker", "compose", "-f", self.docker_compose_file,
-            "restart", "backend"
-        ], check=False)
-
-    def start_services_smart(self) -> bool:
-        """Smart service startup based on current state"""
-        print("🚀 Smart service startup...")
-        
-        containers = self.get_container_status()
-        
-        # Check what's running
-        databases_running = all(
-            name in containers and "healthy" in containers[name].lower()
-            for name in ["ragflow-postgres", "ragflow-qdrant", "ragflow-redis"]
-        )
-        
-        if not databases_running:
-            print("📊 Starting database services...")
-            self.run_command([
-                "docker", "compose", "-f", self.docker_compose_file,
-                "up", "-d", "postgres", "qdrant", "redis"
-            ], check=False)
+            logger.info("✅ Infrastructure services started")
+            return True
             
-            print("⏳ Waiting for databases...")
-            time.sleep(15)
-        else:
-            print("✅ Database services already running")
+        except Exception as e:
+            logger.error(f"❌ Error starting infrastructure: {e}")
+            return False
+
+    def smart_service_startup(self):
+        """Smart startup with dependency management"""
+        logger.info("🚀 Smart service startup with dependency management...")
         
-        # Handle backend based on diagnosis
-        backend_problem = self.diagnose_backend_problem()
-        print(f"🎯 Backend diagnosis: {backend_problem}")
+        # Start infrastructure first
+        if not self.start_infrastructure_services():
+            return False
         
-        if backend_problem == "sqlalchemy_conflict":
-            self.fix_sqlalchemy_conflict()
-            self.restart_backend()
-        elif backend_problem == "container_missing":
-            print("🔨 Starting backend...")
-            self.run_command([
-                "docker", "compose", "-f", self.docker_compose_file,
-                "up", "-d", "backend"
-            ], check=False)
-        elif backend_problem == "container_exited":
-            print("🔄 Restarting exited backend...")
-            self.restart_backend()
-        elif backend_problem == "unknown_unhealthy":
-            print("⚠️ Backend unhealthy, restarting...")
-            self.restart_backend()
+        # Check if backend needs rebuild
+        logger.info("🔄 Checking if backend needs rebuild...")
         
-        # Start frontend if needed
-        if "ragflow-frontend" not in containers:
-            print("🎨 Starting frontend...")
-            self.run_command([
-                "docker", "compose", "-f", self.docker_compose_file,
-                "up", "-d", "frontend"
-            ], check=False)
+        # For now, always rebuild to ensure latest changes
+        logger.info("🔄 Backend: requirements may have changed, rebuild recommended")
+        
+        # Build backend with retry
+        if not self.build_services_with_retry("backend"):
+            logger.error("❌ Failed to build backend after retries")
+            return False
+        
+        # Start backend
+        logger.info("🚀 Starting backend...")
+        cmd = ["docker", "compose", "-f", str(self.compose_file), "up", "-d", "backend"]
+        try:
+            result = self.run_command(cmd, timeout=self.start_timeout, capture_output=False)
+            if result.returncode != 0:
+                logger.error("❌ Failed to start backend")
+                return False
+        except Exception as e:
+            logger.error(f"❌ Error starting backend: {e}")
+            return False
+        
+        # Check if frontend exists and start it
+        if (self.project_root / "frontend").exists():
+            logger.info("🚀 Starting frontend...")
+            cmd = ["docker", "compose", "-f", str(self.compose_file), "up", "-d", "frontend"]
+            try:
+                result = self.run_command(cmd, timeout=self.start_timeout, capture_output=False)
+                if result.returncode != 0:
+                    logger.warning("⚠️  Frontend failed to start (this is okay if not implemented yet)")
+            except Exception as e:
+                logger.warning(f"⚠️  Frontend startup error: {e}")
         
         return True
 
-    def show_final_status(self):
-        """Show final status and URLs"""
-        print("\n" + "="*50)
-        print("🎉 RagFlow Development Environment")
-        print("="*50)
+    def show_service_status(self):
+        """Show status of all services"""
+        logger.info("📊 Service Status:")
         
-        # Check services
-        backend_healthy = False
         try:
-            response = requests.get("http://localhost:8000/ping", timeout=5)
-            backend_healthy = response.status_code == 200
-        except:
-            pass
-        
-        if backend_healthy:
-            print("✅ Backend is running and healthy!")
-            print("\n📊 Available Services:")
-            print("   🔗 Backend API:      http://localhost:8000")
-            print("   📚 API Documentation: http://localhost:8000/docs")
-            print("   🎨 Frontend:         http://localhost:3000")
-            print("   🔍 Qdrant Dashboard: http://localhost:6333/dashboard")
-            
-            print("\n🧪 Quick Tests:")
-            print("   curl http://localhost:8000/ping")
-            print("   curl http://localhost:8000/api/v1/health/")
-            
-        else:
-            print("⚠️ Backend not fully healthy yet")
-            print("\n🔍 Debug Commands:")
-            print("   docker logs ragflow-backend -f")
-            print("   docker exec -it ragflow-backend bash")
-            print("   curl http://localhost:8000/ping")
-        
-        print("\n🛠️ Management:")
-        print("   📜 Logs:    docker compose -f docker/docker-compose.dev.yml logs -f")
-        print("   🔄 Restart: docker compose -f docker/docker-compose.dev.yml restart")
-        print("   🛑 Stop:    docker compose -f docker/docker-compose.dev.yml down")
+            cmd = ["docker", "compose", "-f", str(self.compose_file), "ps"]
+            result = self.run_command(cmd, timeout=30)
+            if result.returncode == 0:
+                print(result.stdout)
+            else:
+                logger.error("❌ Could not get service status")
+        except Exception as e:
+            logger.error(f"❌ Error getting service status: {e}")
 
-    def main(self):
-        """Main execution flow"""
-        print("🚀 RagFlow Smart Development Environment (Fixed)")
-        print("="*55)
+    def show_access_info(self):
+        """Show access information"""
+        logger.info("🌐 Access Information:")
+        print("=" * 60)
+        print("🔗 Backend API: http://localhost:8000")
+        print("📚 API Docs: http://localhost:8000/docs")
+        print("🔍 Qdrant Dashboard: http://localhost:6333/dashboard")
+        if (self.project_root / "frontend").exists():
+            print("🎨 Frontend: http://localhost:3000")
+        print("=" * 60)
+        print()
+        print("🔧 Useful Commands:")
+        print("  View logs: docker compose -f docker/docker-compose.dev.yml logs -f")
+        print("  Stop all: docker compose -f docker/docker-compose.dev.yml down")
+        print("  Restart: docker compose -f docker/docker-compose.dev.yml restart")
+
+    def run(self):
+        """Main execution method"""
+        print("🚀 RagFlow Enhanced Development Environment v2.1")
+        print("=" * 60)
         
-        # Check Docker
-        if not self.check_docker():
+        # Check system requirements
+        self.check_system_requirements()
+        
+        # Create backup
+        self.create_backup()
+        
+        # Check compose file
+        if not self.check_compose_file():
+            return False
+        
+        # Smart startup
+        if not self.smart_service_startup():
+            logger.error("❌ Failed to start services")
+            return False
+        
+        # Wait a bit for services to settle
+        logger.info("⏳ Waiting for services to settle...")
+        time.sleep(15)
+        
+        # Show status
+        self.show_service_status()
+        
+        # Show access info
+        self.show_access_info()
+        
+        logger.info("✅ RagFlow development environment is ready!")
+        return True
+
+def main():
+    """Main entry point"""
+    try:
+        env = RagFlowDevEnvironment()
+        success = env.run()
+        
+        if not success:
+            logger.error("❌ Failed to start development environment")
             sys.exit(1)
-        
-        # Get current status
-        print("\n📊 Current container status:")
-        containers = self.get_container_status()
-        
-        if not containers:
-            print("   No RagFlow containers found")
-            print("\n🔨 Starting fresh environment...")
-            self.run_command([
-                "docker", "compose", "-f", self.docker_compose_file,
-                "up", "-d"
-            ], check=False)
-        else:
-            print(f"   Found {len(containers)} containers")
             
-            # Smart startup based on current state
-            self.start_services_smart()
-        
-        # Wait and check final status
-        print("\n⏳ Waiting for services to stabilize...")
-        time.sleep(20)
-        
-        # Final health check
-        backend_healthy = self.check_backend_health(timeout=30)
-        
-        self.show_final_status()
-        
-        return backend_healthy
+    except KeyboardInterrupt:
+        logger.info("👋 Interrupted by user")
+        sys.exit(0)
+    except Exception as e:
+        logger.error(f"❌ Unexpected error: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
-    dev = RagFlowDev()
-    success = dev.main()
-    sys.exit(0 if success else 1)
+    main()
