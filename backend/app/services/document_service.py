@@ -1,3 +1,4 @@
+# File: backend/app/services/document_service.py
 from fastapi import UploadFile, HTTPException
 from sqlalchemy.orm import Session
 from typing import List, Optional
@@ -54,11 +55,60 @@ class DocumentService:
         self.db.commit()
         self.db.refresh(document)
         
-        # 5. Start background processing
-        asyncio.create_task(self._process_document_async(document.id))
+        # 5. Process document IMMEDIATELY (not in background)
+        try:
+            await self._process_document_sync(document)
+        except Exception as e:
+            logger.error(f"Error processing document {document.id}: {e}")
+            # Update status to failed
+            document.status = "failed"
+            document.error_message = str(e)
+            document.processing_completed_at = datetime.utcnow()
+            self.db.commit()
         
         logger.info(f"Document uploaded: {document.filename} (ID: {document.id})")
         return DocumentResponse.from_orm(document)
+    
+    async def _process_document_sync(self, document: Document):
+        """Process document synchronously"""
+        try:
+            logger.info(f"Starting processing for document: {document.filename}")
+            
+            # Update status to processing
+            document.status = "processing"
+            document.processing_started_at = datetime.utcnow()
+            self.db.commit()
+            
+            # Extract text
+            logger.info(f"Extracting text from: {document.file_path}")
+            content = await self.text_processor.extract_text(document.file_path)
+            logger.info(f"Extracted {len(content)} characters")
+            
+            # Create chunks
+            logger.info("Creating text chunks...")
+            chunks = self.text_processor.chunk_text(content)
+            logger.info(f"Created {len(chunks)} chunks")
+            
+            # Generate embeddings and store in vector DB
+            logger.info("Generating embeddings and storing in vector DB...")
+            vector_ids = await self.vector_service.add_document_chunks(
+                str(document.id), chunks
+            )
+            logger.info(f"Stored {len(vector_ids)} vectors")
+            
+            # Update document
+            document.content = content
+            document.chunks_count = len(chunks)
+            document.vector_ids = vector_ids
+            document.status = "completed"
+            document.processing_completed_at = datetime.utcnow()
+            self.db.commit()
+            
+            logger.info(f"Document processed successfully: {document.filename}")
+            
+        except Exception as e:
+            logger.error(f"Error processing document {document.id}: {e}")
+            raise e
     
     def get_documents(
         self, 
@@ -141,6 +191,9 @@ class DocumentService:
         filename = f"{file_id}{file_extension}"
         file_path = settings.upload_dir / filename
         
+        # Ensure upload directory exists
+        settings.upload_dir.mkdir(parents=True, exist_ok=True)
+        
         # Save file
         async with aiofiles.open(file_path, 'wb') as f:
             content = await file.read()
@@ -178,44 +231,3 @@ class DocumentService:
         safe_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_"
         sanitized = "".join(c if c in safe_chars else "_" for c in filename)
         return sanitized[:255]  # Limit length
-    
-    async def _process_document_async(self, document_id: str):
-        """Background document processing"""
-        try:
-            # Update status
-            document = self.db.query(Document).filter(Document.id == document_id).first()
-            document.status = "processing"
-            document.processing_started_at = datetime.utcnow()
-            self.db.commit()
-            
-            # Extract text
-            content = await self.text_processor.extract_text(document.file_path)
-            
-            # Create chunks
-            chunks = self.text_processor.chunk_text(content)
-            
-            # Generate embeddings and store in vector DB
-            vector_ids = await self.vector_service.add_document_chunks(
-                str(document.id), chunks
-            )
-            
-            # Update document
-            document.content = content
-            document.chunks_count = len(chunks)
-            document.vector_ids = vector_ids
-            document.status = "completed"
-            document.processing_completed_at = datetime.utcnow()
-            self.db.commit()
-            
-            logger.info(f"Document processed successfully: {document.filename}")
-            
-        except Exception as e:
-            logger.error(f"Error processing document {document_id}: {e}")
-            
-            # Update status to failed
-            document = self.db.query(Document).filter(Document.id == document_id).first()
-            if document:
-                document.status = "failed"
-                document.error_message = str(e)
-                document.processing_completed_at = datetime.utcnow()
-                self.db.commit()
