@@ -1,108 +1,166 @@
-# docker/docker-compose.dev.yml - SIMPLIFIED & RELIABLE VERSION
-version: '3.8'
-
-networks:
-  ragflow_network:
-    driver: bridge
-
-volumes:
-  postgres_data:
-  qdrant_data:
-  redis_data:
-  uploads:
+# File: docker/docker-compose.dev.yml
+# Updated Docker Compose with proper environment variable handling
 
 services:
-  # PostgreSQL Database
-  postgres:
-    image: postgres:15-alpine
-    container_name: ragflow-postgres
-    environment:
-      POSTGRES_DB: ragflow
-      POSTGRES_USER: ragflow
-      POSTGRES_PASSWORD: ragflow
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    networks:
-      - ragflow_network
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ragflow -d ragflow"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-
-  # Qdrant Vector Database
-  qdrant:
-    image: qdrant/qdrant:v1.7.0
-    container_name: ragflow-qdrant
-    ports:
-      - "6333:6333"
-      - "6334:6334"
-    volumes:
-      - qdrant_data:/qdrant/storage
-    networks:
-      - ragflow_network
-    environment:
-      - QDRANT__SERVICE__HTTP_PORT=6333
-      - QDRANT__SERVICE__GRPC_PORT=6334
-    healthcheck:
-      test: ["CMD-SHELL", "timeout 10s bash -c '</dev/tcp/localhost/6333'"]
-      interval: 15s
-      timeout: 10s
-      retries: 5
-    restart: unless-stopped
-
-  # Redis Cache
-  redis:
-    image: redis:7-alpine
-    container_name: ragflow-redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    networks:
-      - ragflow_network
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-    restart: unless-stopped
-    command: redis-server --appendonly yes
-
-  # Backend API - SIMPLIFIED BUILD
   backend:
     build:
       context: ../backend
-      dockerfile: Dockerfile.simple
-    container_name: ragflow-backend
+      dockerfile: Dockerfile.dev
     ports:
       - "8000:8000"
     environment:
-      - PYTHONPATH=/app
-      - PYTHONUNBUFFERED=1
-      - DATABASE_URL=postgresql://ragflow:ragflow@postgres:5432/ragflow
+      # Application Settings
+      - DEBUG=true
+      - ENVIRONMENT=development
+      - APP_NAME=RagFlow
+      
+      # Database Configuration
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=ragflow
+      - POSTGRES_PASSWORD=ragflow
+      - POSTGRES_DB=ragflow
+      
+      # Vector Database Configuration
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
-      - REDIS_URL=redis://redis:6379/0
+      
+      # Redis Configuration
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      
+      # LLM Configuration
+      - GOOGLE_API_KEY=AIzaSyDgM3GrrzOv0Wr0TiiaEi3Jf1clvxJTv8s
+      - GEMINI_MODEL=gemini-2.0-flash-exp
+      - OLLAMA_URL=http://localhost:11434
+      - OLLAMA_MODEL=llama3.2
+      
+      # File Upload Configuration
+      - MAX_FILE_SIZE_MB=50
+      - UPLOAD_PATH=/app/uploads
+      
+      # RAG Configuration
+      - MAX_CONTEXT_CHUNKS=5
+      - MAX_CONTEXT_LENGTH=4000
+      - DEFAULT_TEMPERATURE=0.7
+      - DEFAULT_MAX_TOKENS=1000
+      
+      # Embedding Configuration
+      - EMBEDDING_MODEL=all-MiniLM-L6-v2
+    
     volumes:
       - ../backend:/app
       - uploads:/app/uploads
-    networks:
-      - ragflow_network
+    
     depends_on:
-      postgres:
-        condition: service_healthy
-      qdrant:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+      - postgres
+      - qdrant
+      - redis
+    
+    restart: unless-stopped
+    
+    # Health check
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/ping"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 40s
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_USER=ragflow
+      - POSTGRES_PASSWORD=ragflow
+      - POSTGRES_DB=ragflow
+      - POSTGRES_INITDB_ARGS=--encoding=UTF-8 --lc-collate=C --lc-ctype=C
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
     restart: unless-stopped
+    
+    # Health check
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ragflow -d ragflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  qdrant:
+    image: qdrant/qdrant:v1.7.0
+    ports:
+      - "6333:6333"
+      - "6334:6334"  # gRPC port
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__HTTP_PORT=6333
+      - QDRANT__SERVICE__GRPC_PORT=6334
+    restart: unless-stopped
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    restart: unless-stopped
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile.dev
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_APP_NAME=RagFlow
+    volumes:
+      - ../frontend:/app
+      - /app/node_modules
+      - /app/.next
+    depends_on:
+      - backend
+    restart: unless-stopped
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+# Named volumes for data persistence
+volumes:
+  postgres_data:
+    driver: local
+  qdrant_data:
+    driver: local
+  redis_data:
+    driver: local
+  uploads:
+    driver: local
+
+# Network configuration
+networks:
+  default:
+    name: ragflow_network
+    driver: bridge
