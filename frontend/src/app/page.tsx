@@ -1,7 +1,9 @@
+// File: frontend/src/app/page.tsx
 'use client';
 
-import { RagFlowDashboard } from '@/components/dashboard/RagFlowDashboard';
+import React from 'react';
+import MainApp from '@/components/app/MainApp';
 
 export default function Home() {
-  return <RagFlowDashboard />;
+  return <MainApp />;
 }
