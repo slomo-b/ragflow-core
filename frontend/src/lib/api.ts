@@ -131,8 +131,8 @@ class ApiService {
     return response.json();
   }
 
-  async getDocuments(): Promise<{ documents: Document[]; total: number }> {
-    return this.request('/api/v1/documents/');
+  async getDocuments(skip: number = 0, limit: number = 100): Promise<{ documents: Document[]; total: number }> {
+  return this.request(`/api/v1/documents/?skip=${skip}&limit=${limit}`);
   }
 
   async getDocument(documentId: string): Promise<Document> {

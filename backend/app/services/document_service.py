@@ -171,10 +171,14 @@ class DocumentService:
     
     async def _validate_file(self, file: UploadFile):
         """Validate uploaded file"""
-        if file.size > settings.max_file_size:
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="No filename provided")
+        
+        # Check file size - use the correct property
+        if file.size > settings.max_file_size_bytes:
             raise HTTPException(
                 status_code=413,
-                detail=f"File too large. Maximum size: {settings.max_file_size / 1024 / 1024:.1f}MB"
+                detail=f"File too large. Maximum size: {settings.max_file_size_mb}MB"
             )
         
         if file.content_type not in settings.allowed_file_types:
@@ -189,10 +193,13 @@ class DocumentService:
         file_id = str(uuid.uuid4())
         file_extension = Path(file.filename).suffix
         filename = f"{file_id}{file_extension}"
-        file_path = settings.upload_dir / filename
+        
+        # Use the correct property for upload directory
+        upload_dir = Path(settings.upload_directory)
+        file_path = upload_dir / filename
         
         # Ensure upload directory exists
-        settings.upload_dir.mkdir(parents=True, exist_ok=True)
+        upload_dir.mkdir(parents=True, exist_ok=True)
         
         # Save file
         async with aiofiles.open(file_path, 'wb') as f:
